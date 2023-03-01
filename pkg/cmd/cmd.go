@@ -414,6 +414,12 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 				kustomize.NewCmdKustomize(ioStreams),
 			},
 		},
+		{
+			Message: "SidecarSet Commands:",
+			Commands: []*cobra.Command{
+				kset.NewCmdSet(f, ioStreams),
+			},
+		},
 	}
 	groups.Add(cmds)
 

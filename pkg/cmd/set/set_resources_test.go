@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
@@ -461,6 +462,22 @@ func TestSetResourcesRemote(t *testing.T) {
 			path:         "/namespaces/test/replicationcontrollers/nginx",
 			args:         []string{"replicationcontroller", "nginx"},
 		},
+		{
+			name: "test kruiseappsv1alpha1.SidecarSet",
+			object: &kruiseappsv1alpha1.SidecarSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "nginx"},
+				Spec: kruiseappsv1alpha1.SidecarSetSpec{
+					Containers: []kruiseappsv1alpha1.SidecarContainer{
+						{
+							Container: corev1.Container{Name: "nginx", Image: "nginx"},
+						},
+					},
+				},
+			},
+			groupVersion: kruiseappsv1alpha1.SchemeGroupVersion,
+			path:         "/namespaces/test/sidecarsets/nginx",
+			args:         []string{"sidecarset", "nginx"},
+		},
 	}
 
 	for i, input := range inputs {
@@ -475,7 +492,7 @@ func TestSetResourcesRemote(t *testing.T) {
 					switch p, m := req.URL.Path, req.Method; {
 					case p == input.path && m == http.MethodGet:
 						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: objBody(input.object)}, nil
-					case p == input.path && m == http.MethodPatch:
+					case p == input.path && (m == http.MethodPatch || m == http.MethodPut):
 						stream, err := req.GetBody()
 						if err != nil {
 							return nil, err

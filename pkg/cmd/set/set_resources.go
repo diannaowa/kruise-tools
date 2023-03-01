@@ -24,7 +24,6 @@ import (
 	appsv1beta1 "github.com/openkruise/kruise-api/apps/v1beta1"
 	"github.com/openkruise/kruise-tools/pkg/internal/polymorphichelpers"
 	"github.com/spf13/cobra"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -323,6 +322,71 @@ func (o *SetResourcesOptions) Run() error {
 		res := obj.(*appsv1beta1.StatefulSet)
 
 		containers, _ := selectContainers(res.Spec.Template.Spec.Containers, o.ContainerSelector)
+
+		_, err = meta.NewAccessor().Name(res)
+		if err != nil {
+			return err
+		}
+
+		if len(containers) != 0 {
+			for i := range containers {
+				if len(o.Limits) != 0 && len(containers[i].Resources.Limits) == 0 {
+					containers[i].Resources.Limits = make(corev1.ResourceList)
+				}
+				for key, value := range o.ResourceRequirements.Limits {
+					containers[i].Resources.Limits[key] = value
+				}
+
+				if len(o.Requests) != 0 && len(containers[i].Resources.Requests) == 0 {
+					containers[i].Resources.Requests = make(corev1.ResourceList)
+				}
+				for key, value := range o.ResourceRequirements.Requests {
+					containers[i].Resources.Requests[key] = value
+				}
+				transformed = true
+			}
+		} else {
+			allErrs = append(allErrs, fmt.Errorf("error: unable to find container named %s", o.ContainerSelector))
+		}
+		if !transformed {
+			return nil
+		}
+
+		// record this change (for rollout history)
+		if err := o.Recorder.Record(res); err != nil {
+			klog.V(4).Infof("error recording current command: %v", err)
+		}
+
+		if !o.Local {
+			_, err = resource.
+				NewHelper(o.Infos[0].Client, o.Infos[0].Mapping).
+				Replace(o.Infos[0].Namespace, o.Infos[0].Name, true, res)
+			if err != nil {
+				return err
+			}
+		}
+
+		if err := o.PrintObj(res, o.Out); err != nil {
+			return errors.New(err.Error())
+		}
+
+		return utilerrors.NewAggregate(allErrs)
+	case *appsv1alpha1.SidecarSet:
+		var allErrs []error
+		transformed := false
+
+		obj, err := resource.
+			NewHelper(o.Infos[0].Client, o.Infos[0].Mapping).
+			Get(o.Infos[0].Namespace, o.Infos[0].Name)
+		if err != nil {
+			return err
+		}
+		res := obj.(*appsv1alpha1.SidecarSet)
+		var v1containers []*corev1.Container
+		for i := range res.Spec.Containers {
+			v1containers = append(v1containers, &res.Spec.Containers[i].Container)
+		}
+		containers, _ := selectContainersByRef(v1containers, o.ContainerSelector)
 
 		_, err = meta.NewAccessor().Name(res)
 		if err != nil {

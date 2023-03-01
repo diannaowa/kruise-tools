@@ -19,6 +19,7 @@ package set
 import (
 	"fmt"
 
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 	"github.com/openkruise/kruise-tools/pkg/internal/polymorphichelpers"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -55,9 +56,10 @@ type SetImageOptions struct {
 	PrintObj printers.ResourcePrinterFunc
 	Recorder genericclioptions.Recorder
 
-	UpdatePodSpecForObject polymorphichelpers.UpdatePodSpecForObjectFunc
-	Resources              []string
-	ContainerImages        map[string]string
+	UpdatePodSpecForObject   polymorphichelpers.UpdatePodSpecForObjectFunc
+	UpdateContainerForObject polymorphichelpers.UpdateContainerForObjectFunc
+	Resources                []string
+	ContainerImages          map[string]string
 
 	genericclioptions.IOStreams
 }
@@ -75,6 +77,9 @@ var (
 	imageExample = templates.Examples(`
 		# Set a deployment's nginx container image to 'nginx:1.9.1', and its busybox container image to 'busybox'.
 		kubectl-kruise set image cloneset/sample busybox=busybox nginx=nginx:1.9.1
+		
+		# Set a sidecar's sidecar1 container image to 'nginx:1.9.1'.
+		kubectl-kruise set image sidecarset/sample  sidecar1=nginx:1.9.1
 
 		# Update all deployments' and rc's nginx container's image to 'nginx:1.9.1'
 		kubectl-kruise set image cloneset,rc nginx=nginx:1.9.1 --all
@@ -142,6 +147,7 @@ func (o *SetImageOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 	}
 
 	o.UpdatePodSpecForObject = polymorphichelpers.UpdatePodSpecForObjectFn
+	o.UpdateContainerForObject = polymorphichelpers.UpdateContainerForObjectFn
 	o.DryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
 	if err != nil {
 		return err
@@ -228,37 +234,68 @@ func (o *SetImageOptions) Validate() error {
 // Run performs the execution of 'set image' sub command
 func (o *SetImageOptions) Run() error {
 	var allErrs []error
-
-	patches := CalculatePatches(o.Infos, scheme.DefaultJSONEncoder(), func(obj runtime.Object) ([]byte, error) {
-		_, err := o.UpdatePodSpecForObject(obj, func(spec *corev1.PodSpec) error {
-			for name, image := range o.ContainerImages {
-				resolvedImageName, err := o.ResolveImage(image)
-				if err != nil {
-					allErrs = append(allErrs, fmt.Errorf("error: unable to resolve image %q for container %q: %v", image, name, err))
-					if name == "*" {
-						break
+	var patches []*Patch
+	switch o.Infos[0].Object.(type) {
+	case *kruiseappsv1alpha1.SidecarSet:
+		patches = CalculatePatches(o.Infos, scheme.DefaultJSONEncoder(), func(obj runtime.Object) ([]byte, error) {
+			_, err := o.UpdateContainerForObject(obj, func(container *corev1.Container) error {
+				for name, image := range o.ContainerImages {
+					resolvedImageName, err := o.ResolveImage(image)
+					if err != nil {
+						allErrs = append(allErrs, fmt.Errorf("error: unable to resolve image %q for container %q: %v", image, name, err))
+						if name == "*" {
+							break
+						}
+						continue
 					}
-					continue
+					containerFound := setImageForContainer(container, name, resolvedImageName)
+					if !containerFound {
+						allErrs = append(allErrs, fmt.Errorf("error: unable to find container named %q", name))
+					}
 				}
-
-				initContainerFound := setImage(spec.InitContainers, name, resolvedImageName)
-				containerFound := setImage(spec.Containers, name, resolvedImageName)
-				if !containerFound && !initContainerFound {
-					allErrs = append(allErrs, fmt.Errorf("error: unable to find container named %q", name))
-				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
 			}
-			return nil
+			// record this change (for rollout history)
+			if err := o.Recorder.Record(obj); err != nil {
+				klog.V(4).Infof("error recording current command: %v", err)
+			}
+			return runtime.Encode(scheme.DefaultJSONEncoder(), obj)
 		})
-		if err != nil {
-			return nil, err
-		}
-		// record this change (for rollout history)
-		if err := o.Recorder.Record(obj); err != nil {
-			klog.V(4).Infof("error recording current command: %v", err)
-		}
+	default:
+		patches = CalculatePatches(o.Infos, scheme.DefaultJSONEncoder(), func(obj runtime.Object) ([]byte, error) {
+			_, err := o.UpdatePodSpecForObject(obj, func(spec *corev1.PodSpec) error {
+				for name, image := range o.ContainerImages {
+					resolvedImageName, err := o.ResolveImage(image)
+					if err != nil {
+						allErrs = append(allErrs, fmt.Errorf("error: unable to resolve image %q for container %q: %v", image, name, err))
+						if name == "*" {
+							break
+						}
+						continue
+					}
 
-		return runtime.Encode(scheme.DefaultJSONEncoder(), obj)
-	})
+					initContainerFound := setImage(spec.InitContainers, name, resolvedImageName)
+					containerFound := setImage(spec.Containers, name, resolvedImageName)
+					if !containerFound && !initContainerFound {
+						allErrs = append(allErrs, fmt.Errorf("error: unable to find container named %q", name))
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			// record this change (for rollout history)
+			if err := o.Recorder.Record(obj); err != nil {
+				klog.V(4).Infof("error recording current command: %v", err)
+			}
+
+			return runtime.Encode(scheme.DefaultJSONEncoder(), obj)
+		})
+	}
 
 	for _, patch := range patches {
 		info := patch.Info
@@ -312,6 +349,16 @@ func setImage(containers []corev1.Container, containerName string, image string)
 			containerFound = true
 			containers[i].Image = image
 		}
+	}
+	return containerFound
+}
+
+func setImageForContainer(container *corev1.Container, containerName string, image string) bool {
+	containerFound := false
+	// check container name
+	if container.Name == containerName || containerName == "*" {
+		containerFound = true
+		container.Image = image
 	}
 	return containerFound
 }

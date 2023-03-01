@@ -645,6 +645,146 @@ func (o *EnvOptions) RunEnv() error {
 		}
 
 		return nil
+	case *kruiseappsv1alpha1.SidecarSet:
+		obj, err := resource.
+			NewHelper(infos[0].Client, infos[0].Mapping).
+			DryRun(o.dryRunStrategy == cmdutil.DryRunServer).
+			Get(o.namespace, infos[0].Name)
+		if err != nil {
+			return err
+		}
+		res := obj.(*kruiseappsv1alpha1.SidecarSet)
+
+		resolutionErrorsEncountered := false
+		var v1containers []*v1.Container
+		for i := range res.Spec.Containers {
+			v1containers = append(v1containers, &res.Spec.Containers[i].Container)
+		}
+
+		containers, _ := selectContainersByRef(v1containers, o.ContainerSelector)
+
+		objName, err := meta.NewAccessor().Name(res)
+		if err != nil {
+			return err
+		}
+
+		gvks, _, err := scheme.Scheme.ObjectKinds(res)
+		if err != nil {
+			return err
+		}
+
+		objKind := res.GetObjectKind().GroupVersionKind().Kind
+		if len(objKind) == 0 {
+			for _, gvk := range gvks {
+				if len(gvk.Kind) == 0 {
+					continue
+				}
+				if len(gvk.Version) == 0 || gvk.Version == runtime.APIVersionInternal {
+					continue
+				}
+
+				objKind = gvk.Kind
+				break
+			}
+		}
+
+		if len(containers) == 0 {
+			if gvks, _, err := scheme.Scheme.ObjectKinds(res); err == nil {
+				objKind := res.GetObjectKind().GroupVersionKind().Kind
+				if len(objKind) == 0 {
+					for _, gvk := range gvks {
+						if len(gvk.Kind) == 0 {
+							continue
+						}
+						if len(gvk.Version) == 0 || gvk.Version == runtime.APIVersionInternal {
+							continue
+						}
+
+						objKind = gvk.Kind
+						break
+					}
+				}
+
+				fmt.Fprintf(o.ErrOut, "warning: %s/%s does not have any containers matching %q\n", objKind, objName, o.ContainerSelector)
+			}
+			return nil
+		}
+		for _, c := range containers {
+			if !o.Overwrite {
+				if err := validateNoOverwrites(c.Env, env); err != nil {
+					return err
+				}
+			}
+
+			c.Env = updateEnv(c.Env, env, remove)
+			if o.List {
+				resolveErrors := map[string][]string{}
+				store := envutil.NewResourceStore()
+
+				fmt.Fprintf(o.Out, "# %s %s, container %s\n", objKind, objName, c.Name)
+				for _, env := range c.Env {
+					// Print the simple value
+					if env.ValueFrom == nil {
+						fmt.Fprintf(o.Out, "%s=%s\n", env.Name, env.Value)
+						continue
+					}
+
+					// Print the reference version
+					if !o.Resolve {
+						fmt.Fprintf(o.Out, "# %s from %s\n", env.Name, envutil.GetEnvVarRefString(env.ValueFrom))
+						continue
+					}
+
+					value, err := envutil.GetEnvVarRefValue(o.clientset, o.namespace, store, env.ValueFrom, res, c)
+					// Print the resolved value
+					if err == nil {
+						fmt.Fprintf(o.Out, "%s=%s\n", env.Name, value)
+						continue
+					}
+
+					// Print the reference version and save the resolve error
+					fmt.Fprintf(o.Out, "# %s from %s\n", env.Name, envutil.GetEnvVarRefString(env.ValueFrom))
+					errString := err.Error()
+					resolveErrors[errString] = append(resolveErrors[errString], env.Name)
+					resolutionErrorsEncountered = true
+				}
+
+				// Print any resolution errors
+				var errs []string
+				for err, vars := range resolveErrors {
+					sort.Strings(vars)
+					errs = append(errs, fmt.Sprintf("error retrieving reference for %s: %v", strings.Join(vars, ", "), err))
+				}
+				sort.Strings(errs)
+				for _, err := range errs {
+					_, _ = fmt.Fprintln(o.ErrOut, err)
+				}
+			}
+		}
+
+		if !o.Local {
+			_, err := resource.
+				NewHelper(infos[0].Client, infos[0].Mapping).
+				DryRun(o.dryRunStrategy == cmdutil.DryRunServer).
+				Replace(infos[0].Namespace, infos[0].Name, true, res)
+			if err != nil {
+				return fmt.Errorf("failed to patch env update to containers: %v", err)
+			}
+		}
+
+		if resolutionErrorsEncountered {
+			return errors.New("failed to retrieve valueFrom references")
+		}
+
+		if o.List {
+			return nil
+		}
+
+		if err := o.PrintObj(res, o.Out); err != nil {
+			return errors.New(err.Error())
+		}
+
+		return nil
 	default:
 		patches := CalculatePatches(infos, scheme.DefaultJSONEncoder(), func(obj runtime.Object) ([]byte, error) {
 			_, err := o.updatePodSpecForObject(obj, func(spec *v1.PodSpec) error {

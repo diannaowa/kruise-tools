@@ -40,6 +40,19 @@ func selectContainers(containers []v1.Container, spec string) ([]*v1.Container, 
 	return out, skipped
 }
 
+func selectContainersByRef(containers []*v1.Container, spec string) ([]*v1.Container, []*v1.Container) {
+	out := []*v1.Container{}
+	skipped := []*v1.Container{}
+	for i, c := range containers {
+		if selectString(c.Name, spec) {
+			out = append(out, containers[i])
+		} else {
+			skipped = append(skipped, containers[i])
+		}
+	}
+	return out, skipped
+}
+
 // selectString returns true if the provided string matches spec, where spec is a string with
 // a non-greedy '*' wildcard operator.
 // TODO: turn into a regex and handle greedy matches and backtracking.
