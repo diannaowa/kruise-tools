@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -172,7 +173,8 @@ func (o *SetImageOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 
 	o.PrintObj = printer.PrintObj
 
-	cmdNamespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
+	cmdNamespace, _, err := f.ToRawKubeConfigLoader().Namespace()
+	fmt.Println("duizhang:", cmdNamespace)
 	if err != nil {
 		return err
 	}
@@ -183,11 +185,9 @@ func (o *SetImageOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 	}
 
 	builder := f.NewBuilder().
-		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		WithScheme(scheme.Scheme, schema.GroupVersion{Group: kruiseappsv1alpha1.SchemeGroupVersion.Group, Version: kruiseappsv1alpha1.SchemeGroupVersion.Version}).
 		LocalParam(o.Local).
 		ContinueOnError().
-		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, &o.FilenameOptions).
 		Flatten()
 
 	if !o.Local {
@@ -204,6 +204,7 @@ func (o *SetImageOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 	}
 
 	o.Infos, err = builder.Do().Infos()
+	//fmt.Printf("duizhang100, %s", o.Infos[0].Mapping)
 	if err != nil {
 		return err
 	}
@@ -299,6 +300,7 @@ func (o *SetImageOptions) Run() error {
 
 	for _, patch := range patches {
 		info := patch.Info
+		fmt.Println("duizhangname .", info.Namespace)
 		if patch.Err != nil {
 			name := info.ObjectName()
 			allErrs = append(allErrs, fmt.Errorf("error: %s %v\n", name, patch.Err))
