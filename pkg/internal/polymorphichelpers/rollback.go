@@ -26,6 +26,7 @@ import (
 	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 	kruiseappsv1beta1 "github.com/openkruise/kruise-api/apps/v1beta1"
 	kruiseclientsets "github.com/openkruise/kruise-api/client/clientset/versioned"
+
 	internalapps "github.com/openkruise/kruise-tools/pkg/internal/apps"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -140,9 +141,6 @@ func (r *DeploymentRollbacker) Rollback(obj runtime.Object, updatedAnnotations m
 	if dryRunStrategy == cmdutil.DryRunClient {
 		return printTemplate(&rsForRevision.Spec.Template)
 	}
-	if deployment.Spec.Paused {
-		return "", fmt.Errorf("you cannot rollback a paused deployment; resume it first with 'kubectl rollout resume deployment/%s' and try again", name)
-	}
 
 	// Skip if the revision already matches current Deployment
 	if equalIgnoreHash(&rsForRevision.Spec.Template, &deployment.Spec.Template) {
@@ -164,7 +162,6 @@ func (r *DeploymentRollbacker) Rollback(obj runtime.Object, updatedAnnotations m
 			annotations[k] = v
 		}
 	}
-
 	// make patch to restore
 	patchType, patch, err := getDeploymentPatch(&rsForRevision.Spec.Template, annotations)
 	if err != nil {
@@ -175,6 +172,7 @@ func (r *DeploymentRollbacker) Rollback(obj runtime.Object, updatedAnnotations m
 	if dryRunStrategy == cmdutil.DryRunServer {
 		patchOptions.DryRun = []string{metav1.DryRunAll}
 	}
+
 	// Restore revision
 	if _, err = r.c.AppsV1().Deployments(namespace).Patch(context.TODO(), name, patchType, patch, patchOptions); err != nil {
 		return "", fmt.Errorf("failed restoring revision %d: %v", toRevision, err)
@@ -235,6 +233,10 @@ func deploymentRevision(deployment *appsv1.Deployment, c kubernetes.Interface, t
 	allRSs := allOldRSs
 	if newRS != nil {
 		allRSs = append(allRSs, newRS)
+	}
+
+	if len(allRSs) == 1 {
+		return allRSs[0], nil
 	}
 
 	var (
